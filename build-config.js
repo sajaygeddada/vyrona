@@ -2,11 +2,14 @@
 /**
  * Vyrona config builder.
  *
- * Reads ".env" (falling back to ".env.example" if missing, so the app still
- * boots in offline/guest mode) and writes "js/config.js" — a small ES module
- * that the rest of the app imports. This keeps Supabase credentials out of
- * index.html / the login screen and out of source control (.env is
- * git-ignored).
+ * Resolves Supabase credentials in this order:
+ *   1. process.env (set via Netlify dashboard env vars, or any CI)
+ *   2. a local ".env" file (for local dev)
+ *   3. ".env.example" placeholders (so the app still boots in guest mode)
+ *
+ * Writes "js/config.js" — a small ES module the rest of the app imports.
+ * This keeps Supabase credentials out of index.html / the login screen
+ * and out of source control (.env is git-ignored).
  *
  * Usage:
  *   node build-config.js
@@ -41,20 +44,41 @@ function parseEnv(content) {
   return out;
 }
 
-let sourcePath = ENV_PATH;
-if (!fs.existsSync(ENV_PATH)) {
-  console.warn(
-    "[vyrona] No .env found — using .env.example placeholders. " +
-      "Supabase sync will stay disabled until you add a real .env and rerun this script."
-  );
-  sourcePath = ENV_EXAMPLE_PATH;
+// 1. Prefer real CI/host environment variables (Netlify, Vercel, etc).
+let url = process.env.VITE_SUPABASE_URL || "";
+let anonKey = process.env.VITE_SUPABASE_ANON_KEY || "";
+let appName = process.env.VITE_APP_NAME || "";
+let source = "process.env (Netlify/CI env vars)";
+
+// 2. Fall back to a local ".env" file for local dev.
+if (!url || !anonKey) {
+  let sourcePath = null;
+  if (fs.existsSync(ENV_PATH)) {
+    sourcePath = ENV_PATH;
+    source = ".env";
+  } else if (fs.existsSync(ENV_EXAMPLE_PATH)) {
+    sourcePath = ENV_EXAMPLE_PATH;
+    source = ".env.example (placeholders — guest/offline mode only)";
+    console.warn(
+      "[vyrona] No .env and no host env vars found — using .env.example placeholders. " +
+        "Supabase sync will stay disabled until you add real credentials."
+    );
+  }
+
+  if (sourcePath) {
+    const fileEnv = parseEnv(fs.readFileSync(sourcePath, "utf8"));
+    url = url || fileEnv.VITE_SUPABASE_URL || "";
+    anonKey = anonKey || fileEnv.VITE_SUPABASE_ANON_KEY || "";
+    appName = appName || fileEnv.VITE_APP_NAME || "";
+  } else {
+    console.warn(
+      "[vyrona] No .env, no .env.example, and no host env vars found — " +
+        "shipping with empty credentials (guest/offline mode only)."
+    );
+  }
 }
 
-const env = parseEnv(fs.readFileSync(sourcePath, "utf8"));
-
-const url = env.VITE_SUPABASE_URL || "";
-const anonKey = env.VITE_SUPABASE_ANON_KEY || "";
-const appName = env.VITE_APP_NAME || "Vyrona";
+appName = appName || "Vyrona";
 
 const isPlaceholder =
   !url || url.includes("YOUR-PROJECT-REF") || !anonKey || anonKey.includes("your-anon-public-key");
@@ -77,7 +101,7 @@ fs.mkdirSync(path.dirname(OUT_PATH), { recursive: true });
 fs.writeFileSync(OUT_PATH, banner + body);
 
 console.log(
-  `[vyrona] Wrote ${path.relative(ROOT, OUT_PATH)} — Supabase ${
+  `[vyrona] Wrote ${path.relative(ROOT, OUT_PATH)} (source: ${source}) — Supabase ${
     isPlaceholder ? "NOT configured (guest/offline mode only)" : "configured ✔"
   }`
 );
